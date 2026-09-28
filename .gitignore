@@ -1,0 +1,21 @@
+# Build output
+build/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Kotlin / Gradle caches
+.gradle/
+.kotlin/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Local environment / secrets
+.env
+.env.*
+local.properties
