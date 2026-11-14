@@ -17,6 +17,8 @@ application {
 }
 
 dependencies {
+    implementation(libs.openai.java)
+    implementation(libs.kotlinx.coroutines.core)
     implementation(platform(libs.ktor.bom))
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.server.content.negotiation)

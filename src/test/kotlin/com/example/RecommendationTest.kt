@@ -10,6 +10,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class RecommendationTest {
+    private val expectedResponse = RecommendationResponse(listOf(
+        Recommendation("Example Park", "A scenic outdoor activity that fits within the available time.", 90),
+        Recommendation("Example Local Restaurant", "A nearby place for local food after the outdoor activity.", 60),
+    ))
+
     private val validRequest = RecommendationRequest(
         latitude = 47.4979,
         longitude = 19.0402,
@@ -20,7 +25,7 @@ class RecommendationTest {
 
     @Test
     fun `valid request returns expected recommendations`() = testApplication {
-        application { rootModule() }
+        application { rootModule { expectedResponse } }
         val response = client.post("/recommendations") {
             contentType(ContentType.Application.Json)
             setBody(Json.encodeToString(validRequest))
@@ -29,13 +34,7 @@ class RecommendationTest {
         assertEquals(HttpStatusCode.OK, response.status)
         assertEquals(ContentType.Application.Json, response.contentType()?.withoutParameters())
         val body = Json.decodeFromString<RecommendationResponse>(response.bodyAsText())
-        assertEquals(
-            listOf(
-                Recommendation("Example Park", "A scenic outdoor activity that fits within the available time.", 90),
-                Recommendation("Example Local Restaurant", "A nearby place for local food after the outdoor activity.", 60),
-            ),
-            body.recommendations,
-        )
+        assertEquals(expectedResponse.recommendations, body.recommendations)
     }
 
     @Test
@@ -68,7 +67,7 @@ class RecommendationTest {
 
     @Test
     fun `coordinate boundaries and positive duration are accepted`() = testApplication {
-        application { rootModule() }
+        application { rootModule { expectedResponse } }
         for (latitude in listOf(-90.0, 90.0)) {
             for (longitude in listOf(-180.0, 180.0)) {
                 val response = client.post("/recommendations") {
@@ -91,7 +90,7 @@ class RecommendationTest {
 
     @Test
     fun `malformed JSON and missing fields return bad request`() = testApplication {
-        application { rootModule() }
+        application { rootModule { expectedResponse } }
         for (body in listOf("{", "{}")) {
             val response = client.post("/recommendations") {
                 contentType(ContentType.Application.Json)
@@ -101,8 +100,29 @@ class RecommendationTest {
         }
     }
 
+    @Test
+    fun `upstream failure returns sanitized bad gateway`() = testApplication {
+        application { rootModule { error("private upstream details") } }
+        val response = client.post("/recommendations") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(validRequest))
+        }
+        assertEquals(HttpStatusCode.BadGateway, response.status)
+        assertEquals("""{"error":"Recommendation generation failed"}""", response.bodyAsText())
+    }
+
+    @Test
+    fun `missing configuration returns service unavailable`() = testApplication {
+        application { rootModule { throw RecommendationsUnavailable() } }
+        val response = client.post("/recommendations") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(validRequest))
+        }
+        assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+    }
+
     private fun assertBadRequests(requests: List<RecommendationRequest>) = testApplication {
-        application { rootModule() }
+        application { rootModule { throw AssertionError("Invalid input must not reach the service") } }
         for (request in requests) {
             val response = client.post("/recommendations") {
                 contentType(ContentType.Application.Json)

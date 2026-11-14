@@ -7,14 +7,8 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 
-fun Application.configureRouting() {
+fun Application.configureRouting(recommend: suspend (RecommendationRequest) -> RecommendationResponse) {
     routing {
-        get("/") {
-            call.respondText("Hello, World!")
-        }
-        get("/json/kotlinx-serialization") {
-            call.respond(mapOf("hello" to "world"))
-        }
         post("/recommendations") {
             val request = try {
                 call.receive<RecommendationRequest>()
@@ -27,22 +21,20 @@ fun Application.configureRouting() {
                 call.respond(HttpStatusCode.BadRequest, mapOf("error" to error))
                 return@post
             }
-            call.respond(
-                RecommendationResponse(
-                    recommendations = listOf(
-                        Recommendation(
-                            name = "Example Park",
-                            reason = "A scenic outdoor activity that fits within the available time.",
-                            durationMinutes = 90,
-                        ),
-                        Recommendation(
-                            name = "Example Local Restaurant",
-                            reason = "A nearby place for local food after the outdoor activity.",
-                            durationMinutes = 60,
-                        ),
-                    ),
-                ),
-            )
+            val result = try {
+                recommend(request)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: RecommendationsUnavailable) {
+                call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "Recommendations are not configured"))
+                return@post
+            } catch (e: Exception) {
+                // Do not log SDK exception messages: they may include request/response content.
+                log.warn("Recommendation generation failed: {}", e.javaClass.simpleName)
+                call.respond(HttpStatusCode.BadGateway, mapOf("error" to "Recommendation generation failed"))
+                return@post
+            }
+            call.respond(result)
         }
     }
 }
