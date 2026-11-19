@@ -5,6 +5,7 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.log
 import java.time.Duration
+import kotlinx.coroutines.flow.Flow
 
 fun Application.rootModule() {
     val key = System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
@@ -19,11 +20,11 @@ fun Application.rootModule() {
         .maxRetries(0)
         .build()
     monitor.subscribe(ApplicationStopped) { client.close() }
-    val service = OpenAiRecommendations { client.responses().create(it) }
+    val service = OpenAiRecommendations { responseEvents { client.responses().createStreaming(it) } }
     rootModule(service::recommend)
 }
 
-internal fun Application.rootModule(recommend: suspend (RecommendationRequest) -> RecommendationResponse) {
+internal fun Application.rootModule(recommend: (RecommendationRequest) -> Flow<Recommendation>) {
     configureSerialization()
     configureRouting(recommend)
 }

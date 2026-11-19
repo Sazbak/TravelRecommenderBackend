@@ -4,10 +4,13 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class RecommendationTest {
     private val expectedResponse = RecommendationResponse(listOf(
@@ -24,17 +27,69 @@ class RecommendationTest {
     )
 
     @Test
-    fun `valid request returns expected recommendations`() = testApplication {
-        application { rootModule { expectedResponse } }
+    fun `valid request returns one recommendation per NDJSON line`() = testApplication {
+        application { rootModule { expectedResponse.recommendations.asFlow() } }
         val response = client.post("/recommendations") {
             contentType(ContentType.Application.Json)
+            accept(ContentType.parse("application/x-ndjson"))
             setBody(Json.encodeToString(validRequest))
         }
 
         assertEquals(HttpStatusCode.OK, response.status)
-        assertEquals(ContentType.Application.Json, response.contentType()?.withoutParameters())
-        val body = Json.decodeFromString<RecommendationResponse>(response.bodyAsText())
-        assertEquals(expectedResponse.recommendations, body.recommendations)
+        assertEquals(ContentType.parse("application/x-ndjson"), response.contentType()?.withoutParameters())
+        val body = response.bodyAsText()
+        assertTrue(body.endsWith("\n"))
+        val lines = body.removeSuffix("{\"done\":true}\n").removeSuffix("\n").split('\n')
+        assertEquals(expectedResponse.recommendations.size, lines.size)
+        assertEquals(expectedResponse.recommendations, lines.map { Json.decodeFromString<Recommendation>(it) })
+    }
+
+    @Test
+    fun `empty recommendations return only the completion marker`() = testApplication {
+        application { rootModule { emptyList<Recommendation>().asFlow() } }
+        val response = client.post("/recommendations") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(validRequest))
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(ContentType.parse("application/x-ndjson"), response.contentType()?.withoutParameters())
+        assertEquals("{\"done\":true}\n", response.bodyAsText())
+    }
+
+    @Test
+    fun `newlines and special characters stay within one JSON record`() = testApplication {
+        val recommendation = Recommendation("Park \"A\"", "First line\nSecond line\r\nTab\tBackslash \\ Budapest: árvíz", 30)
+        application { rootModule { listOf(recommendation).asFlow() } }
+        val response = client.post("/recommendations") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(validRequest))
+        }
+        val body = response.bodyAsText()
+        assertEquals(2, body.count { it == '\n' })
+        assertTrue(body.endsWith("\n"))
+        assertEquals(recommendation, Json.decodeFromString<Recommendation>(body.substringBefore('\n')))
+    }
+
+    @Test
+    fun `failure after first recommendation emits sanitized error without completion marker`() = testApplication {
+        application {
+            rootModule {
+                flow {
+                    emit(expectedResponse.recommendations.first())
+                    error("private upstream details")
+                }
+            }
+        }
+        val response = client.post("/recommendations") {
+            contentType(ContentType.Application.Json)
+            setBody(Json.encodeToString(validRequest))
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(
+            Json.encodeToString(expectedResponse.recommendations.first()) +
+                "\n{\"error\":\"Recommendation generation failed\"}\n",
+            response.bodyAsText(),
+        )
     }
 
     @Test
@@ -67,7 +122,7 @@ class RecommendationTest {
 
     @Test
     fun `coordinate boundaries and positive duration are accepted`() = testApplication {
-        application { rootModule { expectedResponse } }
+        application { rootModule { expectedResponse.recommendations.asFlow() } }
         for (latitude in listOf(-90.0, 90.0)) {
             for (longitude in listOf(-180.0, 180.0)) {
                 val response = client.post("/recommendations") {
@@ -90,7 +145,7 @@ class RecommendationTest {
 
     @Test
     fun `malformed JSON and missing fields return bad request`() = testApplication {
-        application { rootModule { expectedResponse } }
+        application { rootModule { expectedResponse.recommendations.asFlow() } }
         for (body in listOf("{", "{}")) {
             val response = client.post("/recommendations") {
                 contentType(ContentType.Application.Json)

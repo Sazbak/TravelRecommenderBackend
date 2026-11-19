@@ -8,12 +8,11 @@ import kotlin.test.*
 class ServerTest {
 
     @Test
-    fun `test root endpoint`() = testApplication {
+    fun `unknown root endpoint returns not found`() = testApplication {
         application {
-            rootModule()
+            rootModule { throw AssertionError("Unknown routes must not invoke recommendations") }
         }
-        // verify server root returns 200
-        assertEquals(HttpStatusCode.OK, client.get("/").status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/").status)
     }
 
 }

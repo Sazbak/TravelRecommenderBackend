@@ -57,8 +57,40 @@ roots, Kotlin support, and Ktor dependencies; no manual source-root setup is nee
 
 ## OpenAI recommendation tool loop
 
-The existing `POST /recommendations` request and response JSON are unchanged.
-Valid requests use the official OpenAI Java SDK async Responses API with
+`POST /recommendations` accepts an `application/json` request and returns
+`application/x-ndjson` on success. Each completed recommendation is sent as a
+newline-terminated object, with no enclosing array or `recommendations` wrapper.
+A final `{"done":true}` line confirms successful completion:
+
+```ndjson
+{"name":"Example Park","reason":"A scenic outdoor activity.","durationMinutes":90}
+{"name":"Example Restaurant","reason":"A nearby place for local food.","durationMinutes":60}
+{"done":true}
+```
+
+An empty recommendation list returns HTTP 200 with only the `{"done":true}` line.
+Clients should parse each nonempty line as JSON; network chunks may split or
+combine lines. Text newlines inside fields are JSON-escaped. The backend consumes
+OpenAI `response.output_text.delta` events and parses complete recommendation
+objects incrementally. Each valid object is sent and flushed immediately, before
+the remaining recommendations or `response.completed` arrive. Tool rounds still
+need to finish before their results can be supplied to the next model request.
+
+The first record is prefetched before HTTP headers are committed. Validation
+errors return HTTP 400, missing configuration returns 503, and generation errors
+before the first recommendation return 502, with `application/json` error bodies.
+After streaming starts, HTTP status remains 200; a generation failure instead
+ends the NDJSON stream with `{"error":"Recommendation generation failed"}` and
+no `done` marker. A disconnected or truncated stream can have neither marker.
+Clients must require `done: true` to consider the result complete and handle
+earlier recommendations as partial results on error or disconnect.
+
+Each recommendation is checked for nonblank fields and positive duration before
+emission; the cumulative duration must stay within the request's budget. Final
+JSON and the completed API response are also checked before the `done` marker.
+Already delivered records cannot be retracted if a later validation fails.
+
+Valid requests use the official OpenAI Java SDK async streaming Responses API with
 `gpt-6.1-sol`. Exactly one function tool, `search_places(query, latitude, longitude)`,
 is exposed with automatic tool choice. Only API-returned function calls execute
 the local Kotlin function. Each result is sent as `function_call_output` with
@@ -88,8 +120,9 @@ key or base URL environment variables are consumed.
 In another terminal:
 
 ```sh
-curl -i http://localhost:8080/recommendations \
+curl -i -N http://localhost:8080/recommendations \
   -H 'Content-Type: application/json' \
+  -H 'Accept: application/x-ndjson, application/json' \
   -d '{
     "latitude": 47.4979,
     "longitude": 19.0402,
@@ -115,15 +148,20 @@ and the following request's matching call IDs and previous response ID.
 Prompts, coordinates, API keys and raw SDK exception messages are not logged.
 
 Requests are bounded to six Responses rounds with a 60-second SDK timeout per
-round and SDK retries disabled. Coroutine cancellation cancels the pending future.
+round and SDK retries disabled. Coroutine cancellation closes the SDK stream.
+The SDK event bridge has bounded buffering, and parsed output is limited to 1,048,576 characters
+per round. Downstream cancellation or a failed write cancels the producer.
 Invalid tool arguments are returned as tool errors so the model can correct them.
 Missing configuration returns HTTP 503; upstream failures, refusals, incomplete
-responses, invalid final output and exhausted rounds return sanitized HTTP 502.
+responses, invalid final output and exhausted rounds use the pre-stream HTTP 502
+or mid-stream error record described above.
 Existing invalid request handling remains HTTP 400. There is no fallback to
 hardcoded endpoint recommendations. Responses use `store=true` for server-side
 continuation; this implementation does not support a zero-retention configuration.
 
-Run `./gradlew test` and `./gradlew build`. Tests use scripted SDK responses and
-injected endpoint handlers without credentials or calls to OpenAI. A successful
+Run `./gradlew test` and `./gradlew build`. Tests use scripted SDK stream events and
+injected endpoint handlers without credentials or calls to OpenAI. A local Netty
+HTTP test withholds the end of generation until the client has read the first
+recommendation, proving that delivery does not wait for the full result. A successful
 offline test does not establish account access to the model: use the manual
 request and log sequence above to verify the live integration.

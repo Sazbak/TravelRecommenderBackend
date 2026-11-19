@@ -4,21 +4,21 @@ import com.openai.core.JsonValue
 import com.openai.models.responses.*
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.future.await
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
-import java.util.concurrent.CompletableFuture
 
 internal class RecommendationsUnavailable : IllegalStateException()
 
 /** The function seam keeps tests offline while exercising the real SDK request/response types. */
 internal class OpenAiRecommendations(
-    private val create: (ResponseCreateParams) -> CompletableFuture<Response>,
+    private val create: (ResponseCreateParams) -> Flow<ResponseStreamEvent>,
 ) {
     private val log = LoggerFactory.getLogger(OpenAiRecommendations::class.java)
 
-    suspend fun recommend(request: RecommendationRequest): RecommendationResponse {
+    fun recommend(request: RecommendationRequest): Flow<Recommendation> = flow {
         var previousId: String? = null
         var outputs = emptyList<ResponseInputItem>()
         var toolCalls = 0
@@ -41,7 +41,34 @@ internal class OpenAiRecommendations(
             if (previousId == null) params.input(Json.encodeToString(request))
             else params.previousResponseId(previousId).inputOfResponse(outputs)
 
-            val response = create(params.build()).await()
+            val parser = RecommendationStreamParser()
+            val emitted = mutableListOf<Recommendation>()
+            var totalMinutes = 0L
+            var completed: Response? = null
+            var textItem: String? = null
+            create(params.build()).collect { event ->
+                check(completed == null) { "Events after completion" }
+                when {
+                    event.isOutputTextDelta() -> {
+                        val delta = event.asOutputTextDelta()
+                        check(textItem == null || textItem == delta.itemId()) { "Multiple output messages" }
+                        check(delta.contentIndex() == 0L) { "Multiple content parts" }
+                        textItem = delta.itemId()
+                        parser.append(delta.delta()) { recommendation ->
+                            check(recommendation.name.isNotBlank() && recommendation.reason.isNotBlank() &&
+                                recommendation.durationMinutes > 0) { "Invalid recommendation" }
+                            totalMinutes += recommendation.durationMinutes
+                            check(totalMinutes <= request.availableMinutes) { "Duration budget exceeded" }
+                            emitted += recommendation
+                            emit(recommendation)
+                        }
+                    }
+                    event.isCompleted() -> completed = event.asCompleted().response()
+                    event.isFailed() || event.isIncomplete() || event.isError() ||
+                        event.isRefusalDelta() || event.isRefusalDone() -> error("OpenAI stream failed")
+                }
+            }
+            val response = checkNotNull(completed) { "OpenAI stream ended without completion" }
             check(response.status().orElse(null) == ResponseStatus.COMPLETED) {
                 "OpenAI response did not complete"
             }
@@ -57,9 +84,13 @@ internal class OpenAiRecommendations(
                 } && result.recommendations.sumOf { it.durationMinutes.toLong() } <= request.availableMinutes) {
                     "Invalid recommendation output"
                 }
+                check(parser.finish() == result && emitted == result.recommendations) {
+                    "Streamed output differs from final response"
+                }
                 log.info("OpenAI final response_id={} tool_calls={}", response.id(), toolCalls)
-                return result
+                return@flow
             }
+            check(emitted.isEmpty() && textItem == null) { "Mixed tool calls and recommendation output" }
             check(round < MAX_ROUNDS - 1) { "OpenAI tool-call round limit reached" }
             outputs = calls.map { call ->
                 currentCoroutineContext().ensureActive()
